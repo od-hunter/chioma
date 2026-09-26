@@ -41,7 +41,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle exactly at limit requests', async () => {
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(99); // 99 consumed out of 100
       });
 
@@ -58,7 +58,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle zero point requests', async () => {
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(50);
       });
 
@@ -75,7 +75,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle negative point requests', async () => {
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(50);
       });
 
@@ -93,7 +93,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle very large point requests', async () => {
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(0);
       });
 
@@ -113,7 +113,7 @@ describe('Rate Limiting Edge Cases', () => {
       // consumePoints will call incrementCounter which reads 100, adds 1,
       // stores 101, and returns 101. 101 > 100 → success: false.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(100); // Already at limit
       });
 
@@ -151,7 +151,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle cache set failure', async () => {
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(50);
       });
       mockCacheManager.set.mockRejectedValue(new Error('Cache write failed'));
@@ -176,7 +176,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle TTL retrieval failure', async () => {
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(true);
+        if (key.includes(':block:')) return Promise.resolve(true);
         return Promise.resolve(50);
       });
       mockCacheManager.store.ttl.mockRejectedValue(
@@ -311,7 +311,7 @@ describe('Rate Limiting Edge Cases', () => {
       jest.clearAllMocks();
 
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         // For any other key, return 0
         return Promise.resolve(0);
       });
@@ -332,7 +332,7 @@ describe('Rate Limiting Edge Cases', () => {
       jest.clearAllMocks();
 
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(0);
       });
       mockCacheManager.set.mockResolvedValue(undefined);
@@ -359,7 +359,7 @@ describe('Rate Limiting Edge Cases', () => {
   describe('Data Type Edge Cases', () => {
     it('should handle non-numeric cached values gracefully', async () => {
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve('invalid');
       });
 
@@ -376,7 +376,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle null cached values', async () => {
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(null);
       });
 
@@ -393,7 +393,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should handle undefined cached values', async () => {
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(undefined);
       });
 
@@ -448,7 +448,7 @@ describe('Rate Limiting Edge Cases', () => {
 
       // Simulate a blocked state
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(true);
+        if (key.includes(':block:')) return Promise.resolve(true);
         return Promise.resolve(0);
       });
 
@@ -467,7 +467,7 @@ describe('Rate Limiting Edge Cases', () => {
       const identifier = 'expired-block-test';
 
       mockCacheManager.get.mockImplementation((key) => {
-        if (key.includes('block')) return Promise.resolve(true);
+        if (key.includes(':block:')) return Promise.resolve(true);
         return Promise.resolve(0);
       });
       mockCacheManager.store.ttl.mockResolvedValue(-1); // Expired
@@ -538,7 +538,7 @@ describe('Rate Limiting Edge Cases', () => {
       // Counter starts at 0 for each call (cache miss → treated as 0).
       // 0 + 1 = 1, which is ≤ 100 → success: true for every call.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(null); // fresh window — no prior consumption
       });
 
@@ -563,7 +563,7 @@ describe('Rate Limiting Edge Cases', () => {
       // Simulate callers that read a counter already at 100 (the last allowed
       // point was consumed). Each adds 1 → 101 > 100 → rejected.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(100);
       });
 
@@ -590,7 +590,7 @@ describe('Rate Limiting Edge Cases', () => {
       // A previous violation set the block key; all concurrent callers should
       // be short-circuited before the counter is touched.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(true);
+        if (key.includes(':block:')) return Promise.resolve(true);
         return Promise.resolve(0);
       });
       mockCacheManager.store.ttl.mockResolvedValue(30);
@@ -619,7 +619,7 @@ describe('Rate Limiting Edge Cases', () => {
     it('should allow requests exactly at the limit (boundary — not rejected)', async () => {
       // consumed = 99 + 1 = 100; 100 > 100 is false → success: true, remaining: 0.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(99);
       });
 
@@ -642,7 +642,7 @@ describe('Rate Limiting Edge Cases', () => {
       // null → typeof null !== 'number' → treated as 0 in incrementCounter
       // 0 + 1 = 1 consumed; remaining = 100 - 1 = 99
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(null);
       });
 
@@ -658,14 +658,14 @@ describe('Rate Limiting Edge Cases', () => {
       // Counter key must be written with the new consumed total
       expect(mockCacheManager.set).toHaveBeenCalledWith(
         expect.stringContaining('cache-miss-test'),
-        1,           // 0 prior + 1 consumed
-        60 * 1000,   // duration * 1000 ms
+        1, // 0 prior + 1 consumed
+        60 * 1000, // duration * 1000 ms
       );
     });
 
     it('should treat a cache miss (undefined) as zero prior consumption', async () => {
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(undefined);
       });
 
@@ -689,7 +689,7 @@ describe('Rate Limiting Edge Cases', () => {
       // Prior consumption: 40 points already consumed (cache hit).
       // 40 + 1 = 41; remaining = 100 - 41 = 59.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(40);
       });
 
@@ -704,7 +704,7 @@ describe('Rate Limiting Edge Cases', () => {
       expect(result.remainingPoints).toBe(59);
       expect(mockCacheManager.set).toHaveBeenCalledWith(
         expect.stringContaining('cache-hit-test'),
-        41,          // 40 prior + 1 consumed
+        41, // 40 prior + 1 consumed
         60 * 1000,
       );
     });
@@ -712,7 +712,7 @@ describe('Rate Limiting Edge Cases', () => {
     it('should consume multiple points correctly on a cache hit', async () => {
       // Prior: 30 consumed. Request costs 5 points. 30 + 5 = 35; remaining = 65.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(30);
       });
 
@@ -735,7 +735,7 @@ describe('Rate Limiting Edge Cases', () => {
     it('should reject on a cache hit when adding points exceeds the limit', async () => {
       // Prior: 98 consumed. Request costs 3 points. 98 + 3 = 101 > 100 → rejected.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         return Promise.resolve(98);
       });
 
@@ -753,7 +753,7 @@ describe('Rate Limiting Edge Cases', () => {
 
     it('should record a violation when a cache hit causes a limit breach', async () => {
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         if (key.includes('violations')) return Promise.resolve([]);
         return Promise.resolve(100);
       });
@@ -779,7 +779,7 @@ describe('Rate Limiting Edge Cases', () => {
       // ADMIN category for FREE tier has points: 0 and blockDuration: 86400.
       // consumed = 0 + 1 = 1 > 0 → rejected; blockDuration set → isBlocked: true.
       mockCacheManager.get.mockImplementation((key: string) => {
-        if (key.includes('block')) return Promise.resolve(false);
+        if (key.includes(':block:')) return Promise.resolve(false);
         if (key.includes('violations')) return Promise.resolve([]);
         return Promise.resolve(0);
       });

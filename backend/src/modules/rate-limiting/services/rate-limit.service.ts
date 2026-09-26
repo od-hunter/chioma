@@ -44,10 +44,24 @@ export class RateLimitService {
     const config = this.getConfig(tier, category);
     const key = this.buildKey(identifier, category);
     const blockKey = this.buildBlockKey(identifier, category);
+    const userBlockKey = this.buildUserBlockKey(identifier);
 
     try {
+      const whitelisted = await this.cacheManager.get<boolean>(
+        `rate_limit:whitelist:${identifier}`,
+      );
+      if (whitelisted === true) {
+        return {
+          success: true,
+          remainingPoints: config.points,
+          msBeforeNext: 0,
+          isBlocked: false,
+        };
+      }
+
       const isBlocked = await this.cacheManager.get<boolean>(blockKey);
-      if (isBlocked) {
+      const isUserBlocked = await this.cacheManager.get<boolean>(userBlockKey);
+      if (isBlocked === true || isUserBlocked === true) {
         const ttl = await this.getTTL(blockKey);
         return {
           success: false,
@@ -67,6 +81,11 @@ export class RateLimitService {
         if (config.blockDuration) {
           await this.cacheManager.set(
             blockKey,
+            true,
+            config.blockDuration * 1000,
+          );
+          await this.cacheManager.set(
+            userBlockKey,
             true,
             config.blockDuration * 1000,
           );
@@ -165,6 +184,10 @@ export class RateLimitService {
   ): Promise<number> {
     const config = this.getConfig(tier, category);
     const key = this.buildKey(identifier, category);
+    if (this.redis?.get) {
+      const current = Number(await this.redis.get(key)) || 0;
+      return Math.max(config.points - current, 0);
+    }
     const current = await this.cacheManager.get<number>(key);
     return config.points - (current || 0);
   }
@@ -227,12 +250,17 @@ export class RateLimitService {
     return `rate_limit:block:${category}:${identifier}`;
   }
 
+  private buildUserBlockKey(identifier: string): string {
+    return `rate_limit:block:user:${identifier}`;
+  }
+
   private async recordViolation(
     identifier: string,
     category: EndpointCategory,
   ): Promise<void> {
     const key = `rate_limit:violations:${identifier}`;
-    const violations = (await this.cacheManager.get<any[]>(key)) || [];
+    const stored = await this.cacheManager.get<unknown>(key);
+    const violations = Array.isArray(stored) ? stored : [];
     violations.push({
       category,
       timestamp: Date.now(),
@@ -242,13 +270,16 @@ export class RateLimitService {
 
   private async getTTL(key: string): Promise<number> {
     try {
-      const store = this.cacheManager.stores as {
-        ttl?: (key: string) => Promise<number>;
+      const cache = this.cacheManager as {
+        stores?: { ttl?: (key: string) => Promise<number> };
+        store?: { ttl?: (key: string) => Promise<number> };
       };
-      if (store.ttl) {
-        return await store.ttl(key);
+      const readTtl = cache.stores?.ttl ?? cache.store?.ttl;
+      if (!readTtl) {
+        return 60;
       }
-      return 60;
+      const ttl = await readTtl(key);
+      return typeof ttl === 'number' && ttl > 0 ? ttl : 60;
     } catch {
       return 60;
     }

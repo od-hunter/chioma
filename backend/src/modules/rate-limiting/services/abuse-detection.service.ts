@@ -121,7 +121,9 @@ export class AbuseDetectionService {
       const requestRate =
         record.requestCount / ((now - record.firstSeen) / 1000);
       if (requestRate > ABUSE_DETECTION_CONFIG.rapidFireThreshold) {
-        score += 30;
+        // Crossing the configured rapid-fire threshold is itself abuse.
+        // A partial weight can never reach abuseScoreLimit on its own.
+        score += ABUSE_DETECTION_CONFIG.abuseScoreLimit;
       }
     }
 
