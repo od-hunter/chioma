@@ -12,6 +12,7 @@ import { StellarHealthIndicator } from './indicators/stellar.indicator';
 import { MemoryHealthIndicator } from './indicators/memory.indicator';
 import { RedisHealthIndicator } from './indicators/redis.indicator';
 import { ElasticsearchHealthIndicator } from './indicators/elasticsearch.indicator';
+import { SorobanHealthIndicator } from './indicators/soroban.indicator';
 
 describe('HealthController', () => {
   let controller: HealthController;
@@ -62,6 +63,12 @@ describe('HealthController', () => {
         },
         {
           provide: ElasticsearchHealthIndicator,
+          useValue: {
+            isHealthy: jest.fn(),
+          },
+        },
+        {
+          provide: SorobanHealthIndicator,
           useValue: {
             isHealthy: jest.fn(),
           },

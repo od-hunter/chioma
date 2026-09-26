@@ -15,7 +15,7 @@ import {
   BASE_FEE,
   Account,
 } from '@stellar/stellar-sdk';
-import { waitForSorobanTransactionSuccess } from '../../modules/stellar/services/soroban-transaction-poller';
+import { BlockchainConnectionError } from '../errors/domain-errors';
 
 // ── Connection probe constants ────────────────────────────────────────────────
 
@@ -34,8 +34,8 @@ const PROBE_BACKOFF_MULTIPLIER = 2;
 // ── Connection status ─────────────────────────────────────────────────────────
 
 export type SorobanConnectionStatus =
-  | 'connected'       // probe succeeded at startup
-  | 'disconnected'    // probe failed after all retries
+  | 'connected' // probe succeeded at startup
+  | 'disconnected' // probe failed after all retries
   | 'not-configured'; // SOROBAN_RPC_URL / CHIOMA_CONTRACT_ID absent
 
 export interface SorobanConnectionState {
@@ -63,11 +63,6 @@ export class SorobanClientService implements OnModuleInit {
   private connectionState: SorobanConnectionState;
 
   constructor(private configService: ConfigService) {
-    const rpcUrl = this.configService.get<string>('SOROBAN_RPC_URL', 'https://soroban-testnet.stellar.org');
-    this.server = new SorobanRpc.Server(rpcUrl);
-    this.contractId = this.configService.get<string>('CHIOMA_CONTRACT_ID', '');
-    this.networkPassphrase = this.getNetworkPassphrase();
-    if (!this.contractId) this.logger.warn('CHIOMA_CONTRACT_ID not set - on-chain features will be disabled');
     this.rpcUrl = this.configService.get<string>(
       'SOROBAN_RPC_URL',
       'https://soroban-testnet.stellar.org',
@@ -95,17 +90,24 @@ export class SorobanClientService implements OnModuleInit {
   /**
    * NestJS lifecycle hook — runs once after all providers are wired.
    *
-   * Probes the Soroban RPC endpoint with exponential backoff. On success the
-   * service is marked `connected` and startup proceeds normally. On exhausted
-   * retries the state is set to `disconnected` but the application is still
-   * allowed to boot so that non-blockchain request paths keep working; the
-   * `/health` endpoint will surface the failure as a `warning`.
+   * Probes the Soroban RPC endpoint with exponential backoff. Startup fails
+   * when every attempt is rejected so a deploy cannot look healthy while
+   * blockchain calls would immediately fail.
    *
-   * The deliberate non-fatal stance matches the existing `stellar: 'degraded'`
-   * policy: Soroban writes are queued and retried by background jobs, so an
-   * RPC outage at boot time should not kill the pod.
+   * Jest sets NODE_ENV=test, so the live probe is skipped there. Call
+   * verifyConnection() directly to cover the failure and retry path.
    */
   async onModuleInit(): Promise<void> {
+    if (process.env.NODE_ENV === 'test') {
+      this.logger.log(
+        'Skipping Soroban startup connection check in test environment',
+      );
+      return;
+    }
+    await this.verifyConnection();
+  }
+
+  async verifyConnection(): Promise<void> {
     this.logger.log(
       `[STARTUP] Probing Soroban RPC at ${this.rpcUrl} ` +
         `(max ${PROBE_MAX_ATTEMPTS} attempts)…`,
@@ -130,9 +132,10 @@ export class SorobanClientService implements OnModuleInit {
         const health = await this.server.getHealth();
 
         // getHealth() resolves to { status: 'healthy' } on a live node.
-        if (health?.status !== 'healthy') {
+        const healthStatus = String(health?.status ?? 'unknown');
+        if (healthStatus !== 'healthy') {
           throw new Error(
-            `Unexpected health status from Soroban RPC: "${health?.status}"`,
+            `Unexpected health status from Soroban RPC: "${healthStatus}"`,
           );
         }
 
@@ -162,8 +165,6 @@ export class SorobanClientService implements OnModuleInit {
       }
     }
 
-    // All retries exhausted — log loudly but do not throw; service boots in
-    // degraded mode and the health check surfaces the failure.
     const reason =
       lastError?.message ?? 'unknown error after all probe attempts';
 
@@ -176,11 +177,9 @@ export class SorobanClientService implements OnModuleInit {
       probeAttempts: attempts,
     };
 
-    this.logger.error(
-      `[STARTUP] Soroban RPC unreachable after ${PROBE_MAX_ATTEMPTS} attempts. ` +
-        `Last error: ${reason}. ` +
-        'Application will start in degraded mode; blockchain calls will fail ' +
-        'until the RPC node is reachable.',
+    throw new BlockchainConnectionError(
+      `Soroban RPC unreachable at ${this.rpcUrl} after ${PROBE_MAX_ATTEMPTS} attempts: ${reason}`,
+      { rpcUrl: this.rpcUrl, attempts: PROBE_MAX_ATTEMPTS },
     );
   }
 
@@ -212,9 +211,10 @@ export class SorobanClientService implements OnModuleInit {
     try {
       const health = await this.server.getHealth();
 
-      if (health?.status !== 'healthy') {
+      const healthStatus = String(health?.status ?? 'unknown');
+      if (healthStatus !== 'healthy') {
         throw new Error(
-          `Unexpected health status from Soroban RPC: "${health?.status}"`,
+          `Unexpected health status from Soroban RPC: "${healthStatus}"`,
         );
       }
 
@@ -251,45 +251,48 @@ export class SorobanClientService implements OnModuleInit {
     return this.contractId;
   }
 
-    const txHash = sendResponse.hash;
-    try {
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        txHash,
-        this.configService,
-      );
-      this.logger.log(`Transaction successful: ${txHash}`);
-      return txHash;
-    } catch (error) {
-      this.logger.error(`Transaction failed or timed out: ${txHash}`, error);
-      throw new BadRequestException('Transaction failed or timed out');
-    }
   getNetworkPassphraseValue(): string {
     return this.networkPassphrase;
   }
 
-  getServer(): SorobanRpc.Server { return this.server; }
-  getContractId(): string { return this.contractId; }
-  getNetworkPassphraseValue(): string { return this.networkPassphrase; }
-  getBaseFee(): string { return BASE_FEE; }
-
-  private getNetworkPassphrase(): string {
-    return this.configService.get<string>('STELLAR_NETWORK', 'testnet') === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+  getBaseFee(): string {
+    return BASE_FEE;
   }
 
   getServerKeypair(): Keypair {
     const secretKey = this.configService.get<string>('SERVER_STELLAR_SECRET');
-    if (!secretKey) throw new InternalServerErrorException('SERVER_STELLAR_SECRET environment variable is not set');
+    if (!secretKey)
+      throw new InternalServerErrorException(
+        'SERVER_STELLAR_SECRET environment variable is not set',
+      );
     return Keypair.fromSecret(secretKey);
   }
 
-  async getAccount(publicKey: string): Promise<Account> { return await this.server.getAccount(publicKey); }
-  getContract(): Contract { this.ensureContractId(); return new Contract(this.contractId); }
-  createTransactionBuilder(account: Account): TransactionBuilder { return new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: this.networkPassphrase }); }
+  async getAccount(publicKey: string): Promise<Account> {
+    return await this.server.getAccount(publicKey);
+  }
+  getContract(): Contract {
+    this.ensureContractId();
+    return new Contract(this.contractId);
+  }
+  createTransactionBuilder(account: Account): TransactionBuilder {
+    return new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    });
+  }
 
-  private async waitForTransaction(txHash: string, maxAttempts = 5): Promise<SorobanRpc.Api.GetTransactionResponse> {
+  private async waitForTransaction(
+    txHash: string,
+    maxAttempts = 5,
+  ): Promise<SorobanRpc.Api.GetTransactionResponse> {
     let response = await this.server.getTransaction(txHash);
-    for (let attempt = 0; response.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND && attempt < maxAttempts; attempt++) {
+    for (
+      let attempt = 0;
+      response.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+      attempt < maxAttempts;
+      attempt++
+    ) {
       await this.sleep(1000 * 2 ** attempt);
       response = await this.server.getTransaction(txHash);
     }
@@ -302,37 +305,67 @@ export class SorobanClientService implements OnModuleInit {
     return !message.includes('invalid') && !message.includes('validation');
   }
 
-  async submitTransaction(transaction: ReturnType<TransactionBuilder['build']>, signerKeypair: Keypair): Promise<string> {
+  async submitTransaction(
+    transaction: ReturnType<TransactionBuilder['build']>,
+    signerKeypair: Keypair,
+  ): Promise<string> {
     for (let attempt = 1; attempt <= 5; attempt++) {
       try {
-        const simulateResponse = await this.server.simulateTransaction(transaction);
-        if (SorobanRpc.Api.isSimulationError(simulateResponse)) throw new BadRequestException(`Transaction simulation failed: ${simulateResponse.error}`);
-        if (!SorobanRpc.Api.isSimulationSuccess(simulateResponse)) throw new BadRequestException('Transaction simulation failed');
-        const preparedTx = SorobanRpc.assembleTransaction(transaction, simulateResponse).build();
+        const simulateResponse =
+          await this.server.simulateTransaction(transaction);
+        if (SorobanRpc.Api.isSimulationError(simulateResponse))
+          throw new BadRequestException(
+            `Transaction simulation failed: ${simulateResponse.error}`,
+          );
+        if (!SorobanRpc.Api.isSimulationSuccess(simulateResponse))
+          throw new BadRequestException('Transaction simulation failed');
+        const preparedTx = SorobanRpc.assembleTransaction(
+          transaction,
+          simulateResponse,
+        ).build();
         preparedTx.sign(signerKeypair);
         const sendResponse = await this.server.sendTransaction(preparedTx);
-        if (sendResponse.status === 'ERROR') throw new BadRequestException(`Failed to submit transaction: ${JSON.stringify(sendResponse.errorResult)}`);
+        if (sendResponse.status === 'ERROR')
+          throw new BadRequestException(
+            `Failed to submit transaction: ${JSON.stringify(sendResponse.errorResult)}`,
+          );
+        if (!sendResponse.hash) {
+          throw new BadRequestException(
+            'Soroban submission did not return a transaction hash',
+          );
+        }
         const txHash = sendResponse.hash;
         const result = await this.waitForTransaction(txHash);
         if (result.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
           this.logger.log(`Transaction successful: ${txHash}`);
           return txHash;
         }
-        if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED) throw new BadRequestException(`Transaction failed: ${txHash}`);
+        if (result.status === SorobanRpc.Api.GetTransactionStatus.FAILED)
+          throw new BadRequestException(`Transaction failed: ${txHash}`);
         throw new Error(`Transaction status unresolved: ${txHash}`);
       } catch (error) {
         if (!this.isRetryable(error) || attempt === 5) throw error;
-        this.logger.warn(`Soroban transaction retry ${attempt}/5`, error instanceof Error ? error.message : String(error));
+        this.logger.warn(
+          `Soroban transaction retry ${attempt}/5`,
+          error instanceof Error ? error.message : String(error),
+        );
         await this.sleep(1000 * attempt);
       }
     }
     throw new BadRequestException('Soroban transaction failed after retries');
   }
 
-  async simulateTransaction(transaction: ReturnType<TransactionBuilder['build']>): Promise<SorobanRpc.Api.SimulateTransactionResponse> { return await this.server.simulateTransaction(transaction); }
-  ensureContractId(): void { if (!this.contractId) throw new BadRequestException('On-chain features are not configured. CHIOMA_CONTRACT_ID is not set.'); }
-  verifyStellarAddress(address: string): boolean { return !!address && /^G[A-Z2-7]{55}$/.test(address); }
-  private sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+  async simulateTransaction(
+    transaction: ReturnType<TransactionBuilder['build']>,
+  ): Promise<SorobanRpc.Api.SimulateTransactionResponse> {
+    return await this.server.simulateTransaction(transaction);
+  }
+  ensureContractId(): void {
+    if (!this.contractId)
+      throw new BadRequestException(
+        'On-chain features are not configured. CHIOMA_CONTRACT_ID is not set.',
+      );
+  }
   verifyStellarAddress(address: string): boolean {
     if (!address) return false;
     const stellarAddressRegex = /^G[A-Z2-7]{55}$/;

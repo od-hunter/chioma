@@ -8,7 +8,7 @@ import { StellarHealthIndicator } from './indicators/stellar.indicator';
 import { MemoryHealthIndicator } from './indicators/memory.indicator';
 import { RedisHealthIndicator } from './indicators/redis.indicator';
 import { ElasticsearchHealthIndicator } from './indicators/elasticsearch.indicator';
-
+import { SorobanHealthIndicator } from './indicators/soroban.indicator';
 
 @ApiTags('Health')
 @Controller('health')
@@ -21,7 +21,7 @@ export class HealthController {
     private memoryHealthIndicator: MemoryHealthIndicator,
     private redisHealthIndicator: RedisHealthIndicator,
     private elasticsearchHealthIndicator: ElasticsearchHealthIndicator,
-
+    private sorobanHealthIndicator: SorobanHealthIndicator,
   ) {}
 
   /**

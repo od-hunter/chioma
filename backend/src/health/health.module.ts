@@ -11,6 +11,7 @@ import { StellarHealthIndicator } from './indicators/stellar.indicator';
 import { MemoryHealthIndicator } from './indicators/memory.indicator';
 import { RedisHealthIndicator } from './indicators/redis.indicator';
 import { ElasticsearchHealthIndicator } from './indicators/elasticsearch.indicator';
+import { SorobanHealthIndicator } from './indicators/soroban.indicator';
 
 import { HealthAutomationService } from './health-automation.service';
 import { MonitoringModule } from '../modules/monitoring/monitoring.module';
@@ -51,7 +52,8 @@ import { SorobanClientService } from '../common/services/soroban-client.service'
     MemoryHealthIndicator,
     RedisHealthIndicator,
     ElasticsearchHealthIndicator,
-
+    SorobanHealthIndicator,
+    SorobanClientService,
     HealthAutomationService,
   ],
   exports: [
