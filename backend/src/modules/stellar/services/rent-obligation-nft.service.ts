@@ -6,7 +6,6 @@ import {
   assertSorobanSubmissionAccepted,
   waitForSorobanTransactionSuccess,
 } from './soroban-transaction-poller';
-import * as StellarSdk from '@stellar/stellar-sdk';
 import { BlockchainTransactionError } from '../../../common/errors';
 
 export interface MintObligationParams {
@@ -109,15 +108,15 @@ export class RentObligationNftService {
       );
 
       const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
       const txHash = this.extractTransactionHash(
         response,
         `mint_obligation(${params.agreementId})`,
+      );
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        txHash,
+        this.configService,
       );
 
       this.logger.log(
@@ -155,15 +154,15 @@ export class RentObligationNftService {
       );
 
       const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
       const txHash = this.extractTransactionHash(
         response,
         `transfer_obligation(${params.agreementId})`,
+      );
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        txHash,
+        this.configService,
       );
 
       this.logger.log(
@@ -350,15 +349,15 @@ export class RentObligationNftService {
       );
 
       const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
       const txHash = this.extractTransactionHash(
         response,
         `burn_nft(${params.tokenId})`,
+      );
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        txHash,
+        this.configService,
       );
 
       this.logger.log(
@@ -390,15 +389,15 @@ export class RentObligationNftService {
       );
 
       const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
       const txHash = this.extractTransactionHash(
         response,
         `admin_reassign_obligation(${params.agreementId})`,
+      );
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        txHash,
+        this.configService,
       );
 
       this.logger.log(
@@ -546,17 +545,29 @@ export class RentObligationNftService {
    * @returns The validated transaction hash string
    */
   private extractTransactionHash(
-    response: SorobanRpc.Api.SendTransactionResponse,
+    response:
+      | (Partial<SorobanRpc.Api.SendTransactionResponse> & {
+          hash?: string | null;
+          status?: string;
+          errorResult?: unknown;
+        })
+      | null
+      | undefined,
     operationLabel: string,
   ): string {
-    if (!response.hash) {
+    const hash = response?.hash;
+    if (hash == null || hash === '') {
       throw new BlockchainTransactionError(
         `Soroban returned an incomplete response for "${operationLabel}": transaction hash is missing. ` +
-          `Response status: ${response.status ?? 'unknown'}`,
-        { operationLabel, responseStatus: response.status },
+          `Response status: ${response?.status ?? 'unknown'}`,
+        {
+          operationLabel,
+          responseStatus: response?.status,
+          errorResult: response?.errorResult,
+        },
       );
     }
-    return response.hash;
+    return hash;
   }
 
   private async buildTransaction(
