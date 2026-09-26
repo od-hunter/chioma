@@ -5,7 +5,6 @@ import {
   assertSorobanSubmissionAccepted,
   waitForSorobanTransactionSuccess,
 } from './soroban-transaction-poller';
-import * as StellarSdk from '@stellar/stellar-sdk';
 import { TransactionPollingService } from './transaction-polling.service';
 
 export enum DisputeOutcome {
@@ -102,11 +101,6 @@ export class DisputeContractService {
       server,
       result.hash,
       this.configService,
-
-    // Poll for final transaction status
-    return await this.transactionPollingService.pollTransactionStatusStrict(
-      result.hash,
-      { maxAttempts: 30, initialDelayMs: 1000, backoffMultiplier: 1.5 },
     );
   }
 
@@ -149,11 +143,6 @@ export class DisputeContractService {
       server,
       result.hash,
       this.configService,
-
-    // Poll for final transaction status
-    return await this.transactionPollingService.pollTransactionStatusStrict(
-      result.hash,
-      { maxAttempts: 30, initialDelayMs: 1000, backoffMultiplier: 1.5 },
     );
   }
 
@@ -196,11 +185,6 @@ export class DisputeContractService {
       server,
       result.hash,
       this.configService,
-
-    // Poll for final transaction status
-    return await this.transactionPollingService.pollTransactionStatusStrict(
-      result.hash,
-      { maxAttempts: 30, initialDelayMs: 1000, backoffMultiplier: 1.5 },
     );
   }
 
@@ -242,13 +226,6 @@ export class DisputeContractService {
       result.hash,
       this.configService,
     );
-
-    // Poll for final transaction status
-    const txHash =
-      await this.transactionPollingService.pollTransactionStatusStrict(
-        result.hash,
-        { maxAttempts: 30, initialDelayMs: 1000, backoffMultiplier: 1.5 },
-      );
 
     const outcome = await this.getDisputeOutcome(agreementId);
     return { outcome, txHash };

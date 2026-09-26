@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
-import { DataSource } from 'typeorm';
+import { DataSource, getMetadataArgsStorage } from 'typeorm';
 import { DisputesService } from '../disputes.service';
 import {
   Dispute,
@@ -23,21 +23,99 @@ import { AddCommentDto } from '../dto/add-comment.dto';
 import { ResolveDisputeDto } from '../dto/resolve-dispute.dto';
 import { QueryDisputesDto } from '../dto/query-disputes.dto';
 import { UpdateDisputeDto } from '../dto/update-dispute.dto';
-import {
-  NotFoundException,
-  BadRequestException,
-  ForbiddenException,
-} from '@nestjs/common';
 import { AuditModule } from '../../audit/audit.module';
 import { AuditLog } from '../../audit/entities/audit-log.entity';
 import { LockService } from '../../../common/lock';
 import { IdempotencyService } from '../../../common/idempotency';
 import { MalwareScanService } from '../../storage/malware-scan.service';
 import { CacheModule } from '@nestjs/cache-manager';
+import { Payment as GeneralPayment } from '../../payments/entities/payment.entity';
+import { Payment as RentPayment } from '../../rent/entities/payment.entity';
+import { QueueManagementService } from '../../queues/services/queue-management.service';
+import { Arbiter } from '../entities/arbiter.entity';
+import { DisputeVote } from '../entities/dispute-vote.entity';
+import { DisputeBlockchainService } from '../dispute-blockchain.service';
+import {
+  DisputeContractService,
+  DisputeOutcome,
+} from '../../stellar/services/dispute-contract.service';
+import {
+  AgreementNotFoundError,
+  AuthorizationError,
+  BusinessRuleViolationError,
+  DisputeNotFoundError,
+  ValidationError,
+} from '../../../common/errors/domain-errors';
+
+const pdfBuffer = Buffer.from('%PDF-1.4\n');
+const jpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+const invalidBuffer = Buffer.from([0x00, 0x01, 0x02, 0x03]);
 
 jest.mock('fs/promises', () => ({
-  readFile: jest.fn().mockResolvedValue(Buffer.from('mock file contents')),
+  readFile: jest.fn().mockResolvedValue(Buffer.from('%PDF-1.4\n')),
+  mkdir: jest.fn().mockResolvedValue(undefined),
+  writeFile: jest.fn().mockResolvedValue(undefined),
 }));
+
+/**
+ * Entity decorators are evaluated with DB_TYPE=postgres (see test/setup-env.ts).
+ * This suite uses sqlite, which rejects timestamp, jsonb, bytea, and enum.
+ * Rewrite those column args before TypeORM builds the in-memory schema.
+ */
+const SQLITE_COLUMN_TYPES = new Set([
+  'int',
+  'integer',
+  'tinyint',
+  'smallint',
+  'mediumint',
+  'bigint',
+  'int2',
+  'int8',
+  'character',
+  'varchar',
+  'varying character',
+  'nchar',
+  'native character',
+  'nvarchar',
+  'text',
+  'clob',
+  'blob',
+  'real',
+  'double',
+  'double precision',
+  'float',
+  'numeric',
+  'decimal',
+  'boolean',
+  'date',
+  'time',
+  'datetime',
+  'json',
+]);
+
+function useSqliteCompatibleColumnTypes(): void {
+  for (const column of getMetadataArgsStorage().columns) {
+    const type = column.options.type;
+    if (typeof type !== 'string' || SQLITE_COLUMN_TYPES.has(type)) {
+      continue;
+    }
+    if (
+      type === 'timestamp' ||
+      type === 'timestamptz' ||
+      type === 'timestamp with time zone'
+    ) {
+      column.options.type = 'datetime';
+    } else if (type === 'jsonb' || type === 'simple-json') {
+      column.options.type = 'simple-json';
+    } else if (type === 'bytea' || type === 'blob') {
+      column.options.type = 'blob';
+    } else if (type === 'enum' || type === 'simple-enum') {
+      column.options.type = 'simple-enum';
+    } else if (type !== 'uuid' && type !== 'simple-array') {
+      column.options.type = 'varchar';
+    }
+  }
+}
 
 /**
  * Integration Tests for Dispute Module
@@ -49,9 +127,10 @@ jest.mock('fs/promises', () => ({
  * - Error handling and edge cases
  * - Data consistency and integrity
  */
-describe.skip('DisputesService - Integration Tests', () => {
+describe('DisputesService - Integration Tests', () => {
   let module: TestingModule;
   let service: DisputesService;
+  let blockchainService: DisputeBlockchainService;
   let dataSource: DataSource;
   let landlordUser: User;
   let tenantUser: User;
@@ -59,6 +138,7 @@ describe.skip('DisputesService - Integration Tests', () => {
   let testAgreement: RentAgreement;
 
   beforeAll(async () => {
+    useSqliteCompatibleColumnTypes();
     module = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({
@@ -78,9 +158,12 @@ describe.skip('DisputesService - Integration Tests', () => {
             Payment,
             RentObligationNft,
             NFTTransfer,
+            Arbiter,
+            DisputeVote,
           ],
           synchronize: true,
           dropSchema: true,
+          retryAttempts: 0,
         }),
         TypeOrmModule.forFeature([
           Dispute,
@@ -88,6 +171,8 @@ describe.skip('DisputesService - Integration Tests', () => {
           DisputeComment,
           RentAgreement,
           User,
+          Arbiter,
+          DisputeVote,
         ]),
         CacheModule.register(),
         AuditModule,
@@ -99,6 +184,13 @@ describe.skip('DisputesService - Integration Tests', () => {
           useValue: {
             acquire: jest.fn().mockResolvedValue(true),
             release: jest.fn().mockResolvedValue(true),
+            withLock: jest.fn(
+              async (
+                _key: string,
+                _ttlMs: number,
+                task: () => Promise<unknown>,
+              ) => task(),
+            ),
           },
         },
         {
@@ -112,10 +204,42 @@ describe.skip('DisputesService - Integration Tests', () => {
           provide: MalwareScanService,
           useValue: { scan: jest.fn().mockResolvedValue({ clean: true }) },
         },
+        {
+          provide: getRepositoryToken(GeneralPayment),
+          useValue: { findOne: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: getRepositoryToken(RentPayment),
+          useValue: { findOne: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: QueueManagementService,
+          useValue: {
+            addVideoProcessingJob: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        DisputeBlockchainService,
+        {
+          provide: DisputeContractService,
+          useValue: {
+            raiseDispute: jest.fn().mockResolvedValue('chain-tx-hash'),
+            getDispute: jest.fn().mockResolvedValue({
+              agreementId: 'on-chain',
+              detailsHash: 'details',
+              raisedAt: 1,
+              resolved: true,
+              resolvedAt: 1_700_000_000,
+              votesFavorLandlord: 1,
+              votesFavorTenant: 2,
+              outcome: DisputeOutcome.FAVOR_TENANT,
+            }),
+          },
+        },
       ],
     }).compile();
 
     service = module.get<DisputesService>(DisputesService);
+    blockchainService = module.get(DisputeBlockchainService);
     dataSource = module.get<DataSource>(DataSource);
 
     // Setup test data
@@ -134,10 +258,16 @@ describe.skip('DisputesService - Integration Tests', () => {
   afterEach(async () => {
     // Clean up disputes after each test
     if (dataSource && dataSource.isInitialized) {
-      await dataSource.getRepository(DisputeComment).delete({});
-      await dataSource.getRepository(DisputeEvidence).delete({});
-      await dataSource.getRepository(Dispute).delete({});
+      await dataSource.getRepository(DisputeComment).clear();
+      await dataSource.getRepository(DisputeEvidence).clear();
+      await dataSource.getRepository(Dispute).clear();
+      if (testAgreement?.id) {
+        await dataSource
+          .getRepository(RentAgreement)
+          .update(testAgreement.id, { status: AgreementStatus.ACTIVE });
+      }
     }
+    jest.restoreAllMocks();
   });
 
   async function setupTestData() {
@@ -242,7 +372,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       await expect(
         service.createDispute(secondDto, tenantUser.id),
-      ).rejects.toThrow(BadRequestException);
+      ).rejects.toThrow(BusinessRuleViolationError);
     });
 
     it('should reject dispute creation by unauthorized user', async () => {
@@ -263,7 +393,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       await expect(
         service.createDispute(createDto, unauthorizedUser.id),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(AuthorizationError);
     });
 
     it('should reject dispute for non-existent agreement', async () => {
@@ -275,7 +405,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       await expect(
         service.createDispute(createDto, tenantUser.id),
-      ).rejects.toThrow(NotFoundException);
+      ).rejects.toThrow(AgreementNotFoundError);
     });
 
     it('should handle transaction rollback on error', async () => {
@@ -285,25 +415,24 @@ describe.skip('DisputesService - Integration Tests', () => {
         description: 'Test transaction rollback',
       };
 
-      // Mock a database error during save
-      const disputeRepo = dataSource.getRepository(Dispute);
-      const originalSave = disputeRepo.save;
-      jest
-        .spyOn(disputeRepo, 'save')
-        .mockRejectedValueOnce(new Error('Database error'));
+      const createQueryRunner = dataSource.createQueryRunner.bind(dataSource);
+      jest.spyOn(dataSource, 'createQueryRunner').mockImplementation(() => {
+        const queryRunner = createQueryRunner();
+        jest
+          .spyOn(queryRunner.manager, 'save')
+          .mockRejectedValueOnce(new Error('Database error'));
+        return queryRunner;
+      });
 
       await expect(
         service.createDispute(createDto, tenantUser.id),
-      ).rejects.toThrow();
+      ).rejects.toThrow('Database error');
 
-      // Verify agreement status was not changed
       const agreement = await dataSource
         .getRepository(RentAgreement)
         .findOne({ where: { id: testAgreement.id } });
       expect(agreement?.status).toBe(AgreementStatus.ACTIVE);
-
-      // Restore original method
-      disputeRepo.save = originalSave;
+      expect(await dataSource.getRepository(Dispute).count()).toBe(0);
     });
   });
 
@@ -423,6 +552,7 @@ describe.skip('DisputesService - Integration Tests', () => {
         mimetype: 'application/pdf',
         size: 1024 * 500, // 500KB
         path: '/uploads/evidence.pdf',
+        buffer: pdfBuffer,
       };
 
       const evidence = await service.addEvidence(
@@ -448,11 +578,12 @@ describe.skip('DisputesService - Integration Tests', () => {
         mimetype: 'application/x-msdownload',
         size: 1024,
         path: '/uploads/malicious.exe',
+        buffer: invalidBuffer,
       };
 
       await expect(
         service.addEvidence(testDispute.disputeId, mockFile, tenantUser.id),
-      ).rejects.toThrow(BadRequestException);
+      ).rejects.toThrow(ValidationError);
     });
 
     it('should reject files exceeding size limit', async () => {
@@ -461,11 +592,12 @@ describe.skip('DisputesService - Integration Tests', () => {
         mimetype: 'application/pdf',
         size: 11 * 1024 * 1024, // 11MB
         path: '/uploads/large.pdf',
+        buffer: pdfBuffer,
       };
 
       await expect(
         service.addEvidence(testDispute.disputeId, mockFile, tenantUser.id),
-      ).rejects.toThrow(BadRequestException);
+      ).rejects.toThrow(ValidationError);
     });
 
     it('should allow multiple evidence uploads', async () => {
@@ -474,6 +606,7 @@ describe.skip('DisputesService - Integration Tests', () => {
         mimetype: 'image/jpeg',
         size: 1024 * 100,
         path: '/uploads/evidence1.jpg',
+        buffer: jpegBuffer,
       };
 
       const mockFile2 = {
@@ -481,6 +614,7 @@ describe.skip('DisputesService - Integration Tests', () => {
         mimetype: 'application/pdf',
         size: 1024 * 200,
         path: '/uploads/evidence2.pdf',
+        buffer: pdfBuffer,
       };
 
       const evidence1 = await service.addEvidence(
@@ -557,7 +691,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       await expect(
         service.addComment(testDispute.disputeId, commentDto, tenantUser.id),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(AuthorizationError);
     });
 
     it('should maintain comment order by creation time', async () => {
@@ -582,76 +716,7 @@ describe.skip('DisputesService - Integration Tests', () => {
   });
 
   describe('Integration: Resolve Dispute', () => {
-    let testDispute: Dispute;
-
-    beforeEach(async () => {
-      testDispute = await service.createDispute(
-        {
-          agreementId: testAgreement.id,
-          disputeType: DisputeType.SECURITY_DEPOSIT,
-          description: 'Test dispute for resolution',
-        },
-        tenantUser.id,
-      );
-
-      // Move dispute to UNDER_REVIEW status
-      await service.update(
-        testDispute.id,
-        { status: DisputeStatus.UNDER_REVIEW },
-        adminUser.id,
-      );
-    });
-
-    it('should successfully resolve dispute by admin', async () => {
-      const resolveDto: ResolveDisputeDto = {
-        resolution: 'Dispute resolved in favor of tenant',
-      };
-
-      const resolved = await service.resolveDispute(
-        testDispute.disputeId,
-        resolveDto,
-        adminUser.id,
-      );
-
-      expect(resolved.status).toBe(DisputeStatus.RESOLVED);
-      expect(resolved.resolution).toBe('Dispute resolved in favor of tenant');
-      expect(resolved.resolvedBy).toBe(adminUser.id);
-      expect(resolved.resolvedAt).toBeDefined();
-    });
-
-    it('should update agreement status when dispute is resolved', async () => {
-      const resolveDto: ResolveDisputeDto = {
-        resolution: 'Resolved',
-      };
-
-      await service.resolveDispute(
-        testDispute.disputeId,
-        resolveDto,
-        adminUser.id,
-      );
-
-      const agreement = await dataSource
-        .getRepository(RentAgreement)
-        .findOne({ where: { id: testAgreement.id } });
-      expect(agreement?.status).toBe(AgreementStatus.ACTIVE);
-    });
-
-    it('should reject resolution by non-admin user', async () => {
-      const resolveDto: ResolveDisputeDto = {
-        resolution: 'Trying to resolve',
-      };
-
-      await expect(
-        service.resolveDispute(
-          testDispute.disputeId,
-          resolveDto,
-          tenantUser.id,
-        ),
-      ).rejects.toThrow(ForbiddenException);
-    });
-
     it('should reject resolution of dispute not under review', async () => {
-      // Create new dispute in OPEN status
       const openDispute = await service.createDispute(
         {
           agreementId: testAgreement.id,
@@ -661,18 +726,83 @@ describe.skip('DisputesService - Integration Tests', () => {
         tenantUser.id,
       );
 
-      // Reset agreement status
-      await dataSource
-        .getRepository(RentAgreement)
-        .update(testAgreement.id, { status: AgreementStatus.DISPUTED });
-
-      const resolveDto: ResolveDisputeDto = {
-        resolution: 'Trying to resolve open dispute',
-      };
-
       await expect(
-        service.resolveDispute(openDispute.disputeId, resolveDto, adminUser.id),
-      ).rejects.toThrow(BadRequestException);
+        service.resolveDispute(
+          openDispute.disputeId,
+          { resolution: 'Trying to resolve open dispute' },
+          adminUser.id,
+        ),
+      ).rejects.toThrow(BusinessRuleViolationError);
+    });
+
+    describe('when the dispute is under review', () => {
+      let testDispute: Dispute;
+
+      beforeEach(async () => {
+        testDispute = await service.createDispute(
+          {
+            agreementId: testAgreement.id,
+            disputeType: DisputeType.SECURITY_DEPOSIT,
+            description: 'Test dispute for resolution',
+          },
+          tenantUser.id,
+        );
+
+        // Move dispute to UNDER_REVIEW status
+        await service.update(
+          testDispute.id,
+          { status: DisputeStatus.UNDER_REVIEW },
+          adminUser.id,
+        );
+      });
+
+      it('should successfully resolve dispute by admin', async () => {
+        const resolveDto: ResolveDisputeDto = {
+          resolution: 'Dispute resolved in favor of tenant',
+        };
+
+        const resolved = await service.resolveDispute(
+          testDispute.disputeId,
+          resolveDto,
+          adminUser.id,
+        );
+
+        expect(resolved.status).toBe(DisputeStatus.RESOLVED);
+        expect(resolved.resolution).toBe('Dispute resolved in favor of tenant');
+        expect(resolved.resolvedBy).toBe(adminUser.id);
+        expect(resolved.resolvedAt).toBeDefined();
+      });
+
+      it('should update agreement status when dispute is resolved', async () => {
+        const resolveDto: ResolveDisputeDto = {
+          resolution: 'Resolved',
+        };
+
+        await service.resolveDispute(
+          testDispute.disputeId,
+          resolveDto,
+          adminUser.id,
+        );
+
+        const agreement = await dataSource
+          .getRepository(RentAgreement)
+          .findOne({ where: { id: testAgreement.id } });
+        expect(agreement?.status).toBe(AgreementStatus.ACTIVE);
+      });
+
+      it('should reject resolution by non-admin user', async () => {
+        const resolveDto: ResolveDisputeDto = {
+          resolution: 'Trying to resolve',
+        };
+
+        await expect(
+          service.resolveDispute(
+            testDispute.disputeId,
+            resolveDto,
+            tenantUser.id,
+          ),
+        ).rejects.toThrow(AuthorizationError);
+      });
     });
   });
 
@@ -712,7 +842,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       await expect(
         service.update(testDispute.id, updateDto, adminUser.id),
-      ).rejects.toThrow(BadRequestException);
+      ).rejects.toThrow(BusinessRuleViolationError);
     });
 
     it('should allow valid status transitions', async () => {
@@ -745,7 +875,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
   describe('Integration: Get Agreement Disputes', () => {
     beforeEach(async () => {
-      await service.createDispute(
+      const first = await service.createDispute(
         {
           agreementId: testAgreement.id,
           disputeType: DisputeType.RENT_PAYMENT,
@@ -753,8 +883,12 @@ describe.skip('DisputesService - Integration Tests', () => {
         },
         tenantUser.id,
       );
+      await service.update(
+        first.id,
+        { status: DisputeStatus.WITHDRAWN },
+        tenantUser.id,
+      );
 
-      // Reset for second dispute
       await dataSource
         .getRepository(RentAgreement)
         .update(testAgreement.id, { status: AgreementStatus.ACTIVE });
@@ -808,7 +942,7 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       await expect(
         service.getAgreementDisputes(testAgreement.id, unauthorizedUser.id),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(AuthorizationError);
     });
   });
 
@@ -837,13 +971,15 @@ describe.skip('DisputesService - Integration Tests', () => {
     });
 
     it('should handle finding non-existent dispute', async () => {
-      await expect(service.findOne(99999)).rejects.toThrow(NotFoundException);
+      await expect(service.findOne(99999)).rejects.toThrow(
+        DisputeNotFoundError,
+      );
     });
 
     it('should handle finding by non-existent disputeId', async () => {
       await expect(
         service.findByDisputeId('non-existent-uuid'),
-      ).rejects.toThrow(NotFoundException);
+      ).rejects.toThrow(DisputeNotFoundError);
     });
 
     it('should handle empty query results gracefully', async () => {
@@ -879,6 +1015,142 @@ describe.skip('DisputesService - Integration Tests', () => {
 
       const finalCount = await dataSource.getRepository(Dispute).count();
       expect(finalCount).toBe(initialCount);
+    });
+  });
+
+  describe('Integration: Multi-user dispute scenarios', () => {
+    it('lets the tenant open a dispute, the landlord comment, and an admin resolve it', async () => {
+      const dispute = await service.createDispute(
+        {
+          agreementId: testAgreement.id,
+          disputeType: DisputeType.RENT_PAYMENT,
+          description: 'Rent was not received',
+        },
+        tenantUser.id,
+      );
+
+      const comment = await service.addComment(
+        dispute.disputeId,
+        { content: 'I will review the ledger', isInternal: false },
+        landlordUser.id,
+      );
+      expect(comment.userId).toBe(landlordUser.id);
+
+      await service.update(
+        dispute.id,
+        { status: DisputeStatus.UNDER_REVIEW },
+        adminUser.id,
+      );
+
+      const resolved = await service.resolveDispute(
+        dispute.disputeId,
+        { resolution: 'Rent ledger confirmed' },
+        adminUser.id,
+      );
+
+      expect(resolved.status).toBe(DisputeStatus.RESOLVED);
+    });
+
+    it('rejects a user who is not a party to the agreement', async () => {
+      const outsider = await dataSource.getRepository(User).save({
+        email: 'outsider@test.com',
+        firstName: 'Out',
+        lastName: 'Sider',
+        role: UserRole.USER,
+        isActive: true,
+        password: 'hashed_password',
+      } as User);
+
+      await expect(
+        service.createDispute(
+          {
+            agreementId: testAgreement.id,
+            disputeType: DisputeType.OTHER,
+            description: 'Not my agreement',
+          },
+          outsider.id,
+        ),
+      ).rejects.toThrow(AuthorizationError);
+    });
+  });
+
+  describe('Integration: Blockchain state alignment', () => {
+    it('persists on-chain identifiers when a dispute is raised', async () => {
+      const dispute = await service.createDispute(
+        {
+          agreementId: testAgreement.id,
+          disputeType: DisputeType.MAINTENANCE,
+          description: 'Align this dispute with the chain',
+        },
+        tenantUser.id,
+      );
+
+      await blockchainService.raiseDisputeOnChain(dispute, 'GRAISER');
+
+      const stored = await dataSource.getRepository(Dispute).findOne({
+        where: { id: dispute.id },
+      });
+      expect(stored?.blockchainAgreementId).toBe(String(testAgreement.id));
+      expect(stored?.transactionHash).toBe('chain-tx-hash');
+      expect(stored?.blockchainSyncedAt).toBeInstanceOf(Date);
+    });
+
+    it('aligns local status and vote counts with the chain snapshot', async () => {
+      const dispute = await service.createDispute(
+        {
+          agreementId: testAgreement.id,
+          disputeType: DisputeType.SECURITY_DEPOSIT,
+          description: 'Sync vote counts from chain',
+        },
+        tenantUser.id,
+      );
+
+      await blockchainService.raiseDisputeOnChain(dispute, 'GRAISER');
+      await blockchainService.syncDisputeFromChain(dispute.id);
+
+      const stored = await dataSource.getRepository(Dispute).findOne({
+        where: { id: dispute.id },
+      });
+      expect(stored?.status).toBe(DisputeStatus.RESOLVED);
+      expect(stored?.votesFavorTenant).toBe(2);
+      expect(stored?.votesFavorLandlord).toBe(1);
+      expect(stored?.blockchainOutcome).toBe('FavorTenant');
+    });
+  });
+
+  describe('Integration: Dispute state transitions', () => {
+    it('walks OPEN to UNDER_REVIEW to RESOLVED and refuses a further change', async () => {
+      const dispute = await service.createDispute(
+        {
+          agreementId: testAgreement.id,
+          disputeType: DisputeType.TERMINATION,
+          description: 'Walk the status machine',
+        },
+        tenantUser.id,
+      );
+      expect(dispute.status).toBe(DisputeStatus.OPEN);
+
+      const underReview = await service.update(
+        dispute.id,
+        { status: DisputeStatus.UNDER_REVIEW },
+        adminUser.id,
+      );
+      expect(underReview.status).toBe(DisputeStatus.UNDER_REVIEW);
+
+      const resolved = await service.resolveDispute(
+        dispute.disputeId,
+        { resolution: 'Lease ended cleanly' },
+        adminUser.id,
+      );
+      expect(resolved.status).toBe(DisputeStatus.RESOLVED);
+
+      await expect(
+        service.update(
+          dispute.id,
+          { status: DisputeStatus.OPEN },
+          adminUser.id,
+        ),
+      ).rejects.toThrow(BusinessRuleViolationError);
     });
   });
 });
